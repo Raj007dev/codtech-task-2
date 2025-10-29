@@ -1,0 +1,154 @@
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+import sys
+
+# --- Configuration ---
+# A harmless, non-executable string used to test for reflection (XSS)
+TEST_PAYLOAD = "VULN_TEST_STRING_12345"
+
+def get_session():
+    """Returns a requests Session object with basic security headers."""
+    s = requests.Session()
+    # Set a common User-Agent to mimic a browser, preventing simple blocking
+    s.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    return s
+
+def find_forms(url, session):
+    """Fetches a URL and extracts all HTML forms and their inputs."""
+    print(f"🔎 Scanning for forms on: {url}")
+    try:
+        response = session.get(url, timeout=10)
+        response.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error fetching URL: {e}")
+        return []
+
+    soup = BeautifulSoup(response.content, 'html.parser')
+    forms = soup.find_all('form')
+    
+    if not forms:
+        print("   No HTML forms found.")
+        return []
+
+    print(f"   Found {len(forms)} form(s):")
+    
+    form_details = []
+    for i, form in enumerate(forms, 1):
+        details = {}
+        # Get action (where the form submits) and method (GET/POST)
+        action = form.attrs.get("action", url)
+        details['action'] = urljoin(url, action)
+        details['method'] = form.attrs.get("method", "get").lower()
+        
+        # Extract input fields
+        inputs = []
+        for input_tag in form.find_all(['input', 'textarea', 'select']):
+            input_name = input_tag.attrs.get('name')
+            if input_name:
+                inputs.append(input_name)
+        details['inputs'] = inputs
+        form_details.append(details)
+        
+        print(f"   - Form {i}: Method={details['method'].upper()}, Action={details['action']}, Fields={len(inputs)}")
+
+    return form_details
+
+def check_reflection(url, session):
+    """
+    Tests for simple reflective XSS by injecting a test string into a query parameter.
+    NOTE: This only checks GET parameters and is highly simplified.
+    """
+    print(f"\n🧪 Checking URL for reflective vulnerability...")
+    
+    # 1. Parse the original URL to get existing query parameters
+    parsed_url = urlparse(url)
+    
+    # Check if there are existing query parameters
+    if not parsed_url.query:
+        print("   No initial query parameters found to test. Skipping reflection check.")
+        return False
+
+    # 2. Inject the payload into the first parameter found (simplified approach)
+    # The payload is applied to every parameter found
+    
+    new_query_parts = []
+    found_params = False
+    
+    for part in parsed_url.query.split('&'):
+        if '=' in part:
+            param_name, _ = part.split('=', 1)
+            new_query_parts.append(f"{param_name}={TEST_PAYLOAD}")
+            found_params = True
+        else:
+            # Handle parameters without values, e.g., ?flag
+            new_query_parts.append(part)
+
+    if not found_params:
+        print("   Query string exists but has no key/value pairs (e.g., '?...&key'). Skipping.")
+        return False
+        
+    # Rebuild the URL with the test payload
+    injected_url = parsed_url._replace(query="&".join(new_query_parts)).geturl()
+    
+    print(f"   Injected URL (simplified test): {injected_url}")
+    
+    # 3. Request the injected URL and check the response content
+    try:
+        response = session.get(injected_url, timeout=10)
+        response.raise_for_status()
+
+        # 4. Check if the test payload is present in the HTML output
+        if TEST_PAYLOAD in response.text:
+            print("🚨 VULNERABILITY FOUND: The test string was reflected in the page content.")
+            print("   This indicates a potential **Reflective XSS** or parameter injection vulnerability.")
+            return True
+        else:
+            print("👍 Safe: Test string was NOT reflected in the page content.")
+            return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error during reflection test: {e}")
+        return False
+
+def main():
+    """Main function to run the web scanner."""
+    if len(sys.argv) < 2:
+        print("Usage: python web_scanner.py <target_url>")
+        print("Example: python web_scanner.py http://testphp.vulnweb.com")
+        return
+
+    target_url = sys.argv[1]
+    
+    # Add scheme if missing
+    if not target_url.startswith('http'):
+        target_url = 'http://' + target_url
+        
+    print(f"--- Starting Educational Web Scanner for {target_url} ---")
+
+    session = get_session()
+    
+    # 1. Form Discovery
+    forms = find_forms(target_url, session)
+    
+    print("\n--- Summary of Form Fields ---")
+    if forms:
+        for details in forms:
+            print(f"Action: {details['action']}")
+            print(f"Method: {details['method'].upper()}")
+            print(f"Inputs: {', '.join(details['inputs'])}\n")
+    else:
+        print("No forms found for automated testing.")
+
+    # 2. Reflection Check (XSS Principle)
+    # This requires the input URL to have parameters (e.g., http://target.com/?param=value)
+    if '?' in target_url:
+        check_reflection(target_url, session)
+    else:
+        print("\nNote: Skipping simple reflection check because the target URL has no query parameters.")
+        
+    print("\n--- Scanner Finished ---")
+    print("Remember this is a basic tool. Real-world applications require far more sophisticated testing!")
+
+if __name__ == '__main__':
+    main()
